@@ -87,7 +87,7 @@ def build_faiss_index(embeddings):
     return index
 
 def find_relevant_contexts(faiss_index, query_embedding, top_k=5):
-    query_embedding = query_embedding.cpu().numpy()  # Ensure the embedding is on CPU
+    query_embedding = query_embedding.cpu().numpy()
     _, indices = faiss_index.search(query_embedding, top_k)
     return indices[0]
 
@@ -171,11 +171,13 @@ def analyze_code_with_llama3(file_contents, project_description, faiss_index, re
     api_key = "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"
     client = Groq(api_key=api_key)
     combined_text = "\n\n".join([content for _, content in file_contents])
+    if len(combined_text) > 10000:  # Assuming 10,000 characters as a safe limit
+        combined_text = combined_text[:10000]
     text_embeddings = create_embeddings([combined_text])
     relevant_indices = find_relevant_contexts(faiss_index, text_embeddings)
     relevant_context = "\n".join([session['projects'][i] for i in relevant_indices])
     input_prompt = f"""
-You are a code analyzer as well as a tech recruiter and a tech recruiting tool. Your analysis is responsible for hiring this candidate. Analyze the provided code and resume information, including relevant context, and provide insights on the following aspects:
+You are a code analyzer and resume auditor. Analyze the provided code and resume information, including relevant context, and provide insights on the following aspects:
 1. **Code Quality**: Evaluate the code's structure, readability, and adherence to best practices.
 2. **Technology Stack**: List the technologies, frameworks, and tools actually used in the code. Compare these with the technologies claimed in the resume.
 3. **Project Complexity**: Assess the complexity of the project based on the code's functionality and structure.
@@ -187,7 +189,7 @@ Relevant Context from Resume:
 {relevant_context}
 Project Description: {project_description}
 Code: {combined_text}
-Provide your insights, highlighting any discrepancies between the resume and the code, especially regarding the technology stack. 
+Provide your insights, highlighting any discrepancies between the resume and the code, especially regarding the technology stack.
 """
     chat_completion = client.chat.completions.create(
         messages=[{"role": "user", "content": input_prompt}],
@@ -267,6 +269,7 @@ def analyze():
     code_quality_scores = []
     complexity_scores = []
     creation_dates = []
+
     for project, repo_name in repo_map.items():
         repo = github.get_repo(f'{username}/{repo_name}')
         project_description = next((p for p in projects if project in p), "No description found")
@@ -274,19 +277,24 @@ def analyze():
             files_content, warnings, repo_info = fetch_repo_files(repo)
             if warnings:
                 for warning in warnings:
-                    print(warning)
+                    print(f"Warning: {warning}")
             if files_content:
                 ai_insights = analyze_code_with_llama3(files_content, project_description, faiss_index, resume_embeddings)
-                tech_stack_match = re.search(r'Main technologies used: (.*)', ai_insights)
+
+                # Extract technology stack, code quality, and complexity scores
+                tech_stack_match = re.search(r'\*\*Technology Stack Insights:\*\*\n\n(.*?)(?=\n\n)', ai_insights, re.DOTALL)
                 if tech_stack_match:
-                    tech_stacks.extend([tech.strip() for tech in tech_stack_match.group(1).split(',')])
+                    tech_stacks.extend([tech.strip() for tech in tech_stack_match.group(1).split('\n') if tech.strip()])
+
                 code_quality_match = re.search(r'Overall code quality: (\d+)/10', ai_insights)
                 if code_quality_match:
                     code_quality_scores.append((repo_name, int(code_quality_match.group(1))))
+
                 complexity_match = re.search(r'Project complexity: (\d+)/10', ai_insights)
                 if complexity_match:
                     complexity_scores.append((repo_name, int(complexity_match.group(1))))
                     creation_dates.append(repo_info['created_at'])
+
                 insights.append(f"""
                 <div class="insight">
                     <h2>Repo: {repo_info['name']}</h2>
@@ -304,6 +312,7 @@ def analyze():
                 </div>
                 """)
             else:
+                print(f"No code files to analyze for repo: {repo_name}")
                 insights.append(f"""
                 <div class="insight">
                     <h2>Repo: {repo_info['name']}</h2>
@@ -311,15 +320,33 @@ def analyze():
                 </div>
                 """)
         except Exception as e:
+            print(f"Error analyzing repo {repo_name}: {str(e)}")
             insights.append(f"""
             <div class="insight">
                 <h2>Project: {project}, Repo: {repo_name}</h2>
                 <p>Error: {str(e)}</p>
             </div>
             """)
-    tech_stack_chart = create_tech_stack_chart(tech_stacks)
-    code_quality_chart = create_code_quality_chart([score[0] for score in code_quality_scores], [score[1] for score in code_quality_scores])
-    project_complexity_chart = create_project_complexity_chart([score[0] for score in complexity_scores], [score[1] for score in complexity_scores], creation_dates)
+
+    print("Tech Stacks:", tech_stacks)
+    print("Code Quality Scores:", code_quality_scores)
+
+    # Ensure data is not empty before creating charts
+    if tech_stacks:
+        tech_stack_chart = create_tech_stack_chart(tech_stacks)
+    else:
+        tech_stack_chart = json.dumps({})  # Empty chart data if no tech stacks
+
+    if code_quality_scores:
+        code_quality_chart = create_code_quality_chart([score[0] for score in code_quality_scores], [score[1] for score in code_quality_scores])
+    else:
+        code_quality_chart = json.dumps({})  # Empty chart data if no quality scores
+
+    if complexity_scores:
+        project_complexity_chart = create_project_complexity_chart([score[0] for score in complexity_scores], [score[1] for score in complexity_scores], creation_dates)
+    else:
+        project_complexity_chart = json.dumps({})  # Empty chart data if no complexity scores
+
     return f"""
     <html>
     <head>
