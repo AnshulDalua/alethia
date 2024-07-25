@@ -5,16 +5,17 @@ import os
 import pdfplumber
 import re
 from werkzeug.utils import secure_filename
-from langchain.document_loaders import GithubFileLoader
-from langchain.text_splitter import CharacterTextSplitter
+from sentence_transformers import SentenceTransformer
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 import logging
 from fuzzywuzzy import process
-from openai import OpenAI
 import plotly.graph_objs as go
 import plotly.utils
 import json
 from collections import Counter
 from datetime import datetime
+from groq import Groq
 
 app = Flask(__name__)
 app.secret_key = 'a_secure_secret_key'
@@ -26,14 +27,11 @@ UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'pdf'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-OPENAI_API_KEY = 'sk-proj-Crh7jg2GxphwO9yThoj8T3BlbkFJ2GM7V8dVPqoFoM8CYZiK'
-client = OpenAI(
-    api_key=OPENAI_API_KEY,
-)
-MODEL = 'gpt-4o'
-
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
+
+# Initialize the Sentence Transformer model for embeddings
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -80,6 +78,25 @@ def match_repos_to_projects(project_names, repo_names):
         if closest_match:
             repo_map[project] = closest_match[0]
     return repo_map
+
+def create_embeddings(texts):
+    """Creates embeddings for a list of texts using the SentenceTransformer model."""
+    embeddings = embedding_model.encode(texts, convert_to_tensor=True)
+    if embeddings.device.type == 'mps':
+        embeddings = embeddings.cpu()  # Move to CPU if on MPS device
+    return embeddings
+
+
+def find_relevant_contexts(embeddings, query_embedding, top_k=5):
+    """Finds the most relevant contexts based on cosine similarity."""
+    if query_embedding.device.type == 'mps':
+        query_embedding = query_embedding.cpu()
+    if embeddings.device.type == 'mps':
+        embeddings = embeddings.cpu()
+    similarities = cosine_similarity(query_embedding.numpy(), embeddings.numpy())
+    relevant_indices = np.argsort(similarities[0])[::-1][:top_k]
+    return relevant_indices
+
 
 @app.route('/')
 def home():
@@ -161,52 +178,49 @@ def split_text_into_chunks(text, max_tokens=2000):
     chunks.append(text)
     return chunks
 
-def analyze_code_with_gpt4(file_contents, project_description):
+def analyze_code_with_llama3(file_contents, project_description, resume_embeddings):
+    # Set your Groq API key
+    api_key = "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"
+
+    # Initialize the Groq client
+    client = Groq(api_key=api_key)
+
+    # Combine the file contents into a single string
     combined_text = "\n\n".join([content for _, content in file_contents])
-    chunks = split_text_into_chunks(combined_text)
-    insights = []
-    total_score = 0
-    num_chunks = len(chunks)
-    for chunk in chunks:
-        messages = [
-            {
-                "role": "system",
-                "content": "You are a code analyzer. Analyze the provided code and provide insights on code quality, technology stack, project complexity, and test coverage. Also, detect if the project description from the resume is accurate."
-            },
-            {
-                "role": "user",
-                "content": f"Analyze the following code and provide insights:\n\n{chunk}\n\nProject description: {project_description}\n\nProvide insights on:\n1. Code quality (1-10 score)\n2. Technology stack used\n3. Project complexity (1-10 score)\n4. Test coverage (if applicable)\n5. Accuracy of project description (1-10 score)\n\nKeep your evaluation concise and relevant for recruiters."
-            }
-        ]
 
-        response = client.chat.completions.create(
-            model=MODEL, 
-            messages=messages
-        )
+    # Create embeddings for the combined text
+    text_embeddings = create_embeddings([combined_text])
 
-        insights.append(response.choices[0].message.content)
-        scores = re.findall(r'(\d+)/10', response.choices[0].message.content)
-        if scores:
-            total_score += sum(map(int, scores))
-    
-    # Aggregate insights
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a code analyzer. Summarize the insights from multiple code chunks and provide an overall assessment."
-        },
-        {
-            "role": "user",
-            "content": f"Summarize the following insights and provide an overall assessment:\n\n{insights}\n\nProvide a concise summary focusing on:\n1. Overall code quality\n2. Main technologies used\n3. Project complexity\n4. Test coverage\n5. Accuracy of project description\n\nKeep your summary to 5-7 sentences, tailored for recruiters."
-        }
-    ]
+    # Find the most relevant context from the resume
+    relevant_indices = find_relevant_contexts(resume_embeddings, text_embeddings)
+    relevant_context = "\n".join([session['projects'][i] for i in relevant_indices])
 
-    response = client.chat.completions.create(
-        model=MODEL, 
-        messages=messages
+    input_prompt = f"""
+You are a code analyzer. Analyze the provided code and resume information, including relevant context, and provide insights on the following aspects:
+
+1. Code quality
+2. Technology stack
+3. Project complexity
+4. Test coverage
+5. Resume accuracy
+6. Authenticity
+
+Relevant Context from Resume:
+{relevant_context}
+
+Project Description: {project_description}
+Code: {combined_text}
+
+Provide your insights.
+"""
+
+    chat_completion = client.chat.completions.create(
+        messages=[{"role": "user", "content": input_prompt}],
+        model="llama-3.1-8b-instant",
     )
 
-    return response.choices[0].message.content
+    output_text = chat_completion.choices[0].message.content
+    return output_text
 
 def fetch_repo_files(repo):
     allowed_extensions = ('.py', '.html', '.js', '.css', '.java', '.cpp', '.ts', '.tsx')
@@ -245,28 +259,6 @@ def fetch_repo_files(repo):
 
     return files_content, warnings, repo_info
 
-def create_tech_stack_chart(tech_stacks):
-    tech_count = Counter(tech_stacks)
-    labels = list(tech_count.keys())
-    values = list(tech_count.values())
-
-    trace = go.Pie(labels=labels, values=values, textinfo='label+percent', insidetextorientation='radial')
-    layout = go.Layout(title='Technology Stack Distribution')
-    fig = go.Figure(data=[trace], layout=layout)
-    return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
-
-def create_code_quality_chart(repo_names, code_quality_scores):
-    trace = go.Bar(x=repo_names, y=code_quality_scores)
-    layout = go.Layout(title='Code Quality Scores by Repository', xaxis_title='Repository', yaxis_title='Code Quality Score')
-    fig = go.Figure(data=[trace], layout=layout)
-    return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
-
-def create_project_complexity_chart(repo_names, complexity_scores, creation_dates):
-    trace = go.Scatter(x=creation_dates, y=complexity_scores, mode='markers', text=repo_names, marker=dict(size=10))
-    layout = go.Layout(title='Project Complexity Over Time', xaxis_title='Creation Date', yaxis_title='Complexity Score')
-    fig = go.Figure(data=[trace], layout=layout)
-    return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
-
 @app.route('/analyze')
 def analyze():
     github = Github(session.get('access_token'))
@@ -279,11 +271,9 @@ def analyze():
     repo_names = [repo.name for repo in repos]
     repo_map = match_repos_to_projects(project_names, repo_names)
     
-    tech_stacks = []
-    code_quality_scores = []
-    complexity_scores = []
-    creation_dates = []
-    
+    # Create embeddings for the projects
+    resume_embeddings = create_embeddings(projects)
+    count = 2
     for project, repo_name in repo_map.items():
         repo = github.get_repo(f'{username}/{repo_name}')
         project_description = next((p for p in projects if project in p), "No description found")
@@ -293,21 +283,10 @@ def analyze():
                 for warning in warnings:
                     print(warning)
             if files_content:
-                ai_insights = analyze_code_with_gpt4(files_content, project_description)
-                
-                # Extract technology stack, code quality, and complexity scores
-                tech_stack_match = re.search(r'Main technologies used: (.*)', ai_insights)
-                if tech_stack_match:
-                    tech_stacks.extend([tech.strip() for tech in tech_stack_match.group(1).split(',')])
-                
-                code_quality_match = re.search(r'Overall code quality: (\d+)/10', ai_insights)
-                if code_quality_match:
-                    code_quality_scores.append((repo_name, int(code_quality_match.group(1))))
-                
-                complexity_match = re.search(r'Project complexity: (\d+)/10', ai_insights)
-                if complexity_match:
-                    complexity_scores.append((repo_name, int(complexity_match.group(1))))
-                    creation_dates.append(repo_info['created_at'])
+                if count != 2:
+                    count = count + 1
+                    continue
+                ai_insights = analyze_code_with_llama3(files_content, project_description, resume_embeddings)
                 
                 insights.append(f"""
                 <div class="insight">
@@ -340,71 +319,9 @@ def analyze():
             </div>
             """)
     
-    # Create charts
-    tech_stack_chart = create_tech_stack_chart(tech_stacks)
-    code_quality_chart = create_code_quality_chart([score[0] for score in code_quality_scores], [score[1] for score in code_quality_scores])
-    project_complexity_chart = create_project_complexity_chart([score[0] for score in complexity_scores], [score[1] for score in complexity_scores], creation_dates)
+    # You can include chart creation and rendering here if needed.
     
-    insights_str = "".join(insights)
-    return f"""
-    <html>
-    <head>
-        <style>
-            body {{
-                font-family: Arial, sans-serif;
-                line-height: 1.6;
-            }}
-            .container {{
-                width: 80%;
-                margin: auto;
-            }}
-            .insight {{
-                margin-bottom: 20px;
-            }}
-            .insight h2 {{
-                background-color: #f2f2f2;
-                padding: 10px;
-                border-left: 5px solid #333;
-            }}
-            .insight p {{
-                padding: 10px;
-                background-color: #f9f9f9;
-            }}
-            .insight pre {{
-                background-color: #eef;
-                padding: 10px;
-                border: 1px solid #ddd;
-                white-space: pre-wrap;
-            }}
-            .chart {{
-                width: 100%;
-                height: 400px;
-                margin-bottom: 20px;
-            }}
-        </style>
-        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-    </head>
-    <body>
-        <div class="container">
-            <h1>GitHub Insights</h1>
-            <div id="tech-stack-chart" class="chart"></div>
-            <div id="code-quality-chart" class="chart"></div>
-            <div id="project-complexity-chart" class="chart"></div>
-            {insights_str}
-        </div>
-        <script>
-            var techStackData = {tech_stack_chart};
-            Plotly.newPlot('tech-stack-chart', techStackData.data, techStackData.layout);
-            
-            var codeQualityData = {code_quality_chart};
-            Plotly.newPlot('code-quality-chart', codeQualityData.data, codeQualityData.layout);
-            
-            var projectComplexityData = {project_complexity_chart};
-            Plotly.newPlot('project-complexity-chart', projectComplexityData.data, projectComplexityData.layout);
-        </script>
-    </body>
-    </html>
-    """
+    return f"<html><body>{''.join(insights)}</body></html>"
 
 if __name__ == '__main__':
     app.run(debug=True)
