@@ -10,6 +10,11 @@ from langchain.text_splitter import CharacterTextSplitter
 import logging
 from fuzzywuzzy import process
 from openai import OpenAI
+import plotly.graph_objs as go
+import plotly.utils
+import json
+from collections import Counter
+from datetime import datetime
 
 app = Flask(__name__)
 app.secret_key = 'a_secure_secret_key'
@@ -166,11 +171,11 @@ def analyze_code_with_gpt4(file_contents, project_description):
         messages = [
             {
                 "role": "system",
-                "content": "You are a code analyzer. Please analyze the provided code and provide insights. You are to detect if an applicant's project description from their resume is an accurate representation of the code, or if it is not accurate. Please first generate a score from 1-10 regarding if the code aligns with the description. Follow this rubric: 1-3: Inaccurate, 4-6: Partially Accurate, 7-10: Accurate."
+                "content": "You are a code analyzer. Analyze the provided code and provide insights on code quality, technology stack, project complexity, and test coverage. Also, detect if the project description from the resume is accurate."
             },
             {
                 "role": "user",
-                "content": f"Analyze the following code and provide insights:\n\n{chunk}. See if this project description {project_description} is an accurate representation of the code, or if it is not accurate. Keep your evaluation to 3 sentences, in your evaluation do not mention the chunks, only mention the insights. Your audience is a recruiter, so provide them the required informatoin. No need to mention chunks, or your process, only give them info that they would find useful. Again, do not mention chunks, only speak about the project as a whole.  "
+                "content": f"Analyze the following code and provide insights:\n\n{chunk}\n\nProject description: {project_description}\n\nProvide insights on:\n1. Code quality (1-10 score)\n2. Technology stack used\n3. Project complexity (1-10 score)\n4. Test coverage (if applicable)\n5. Accuracy of project description (1-10 score)\n\nKeep your evaluation concise and relevant for recruiters."
             }
         ]
 
@@ -179,34 +184,29 @@ def analyze_code_with_gpt4(file_contents, project_description):
             messages=messages
         )
 
-        print(response)
-
         insights.append(response.choices[0].message.content)
-        score_match = re.search(r'\*\*Score: (\d+)\*\*', response.choices[0].message.content)
-        if score_match:
-            total_score += int(score_match.group(1))
+        scores = re.findall(r'(\d+)/10', response.choices[0].message.content)
+        if scores:
+            total_score += sum(map(int, scores))
     
+    # Aggregate insights
     messages = [
-            {
-                "role": "system",
-                "content": "You are a code analyzer. Please analyze the provided code and provide insights. You are to detect if an applicant's project description from their resume is an accurate representation of the code, or if it is not accurate. You have already analyzed each chunk of the code, and generated a score from 1-10 regarding if the code aligns with the description. You followed this rubric: 1-3: Inaccurate, 4-6: Partially Accurate, 7-10: Accurate. Now you are given all the insights for each chunk, your job is to read the analysis you have already done chunk by chunk, and give an overall score as well as insigts. Know that since you only had access to each chunk when you analyzed before, some scores may be inaccurate as the chunk you analyzed may not be directly related to the description, or maybe the chunk is less relevent part of the project. For example, you may have ranked a chunk a score of 5 when the other chunks were scores of 8-9, meaning that chunk was a non essential code, while the rest were. In this case the project should be rated a 9 as the other chunks satisfied the description. "
-            },
-            {
-                "role": "user",
-                "content": f"Analyze the following insights and provide an overall score for the applicants project to see if the project description is accurate or not:\n\n{insights}. Each insight is an isight of a chunk, your job is to read through each insight already generated and you are to provide an overall score. Know that some insights may be lower than they should, as the chunk analyzed was not a direct representation of the description, while other chunks were. Keep your evaluation to 3 sentences + score.  "
-            }
-        ]
+        {
+            "role": "system",
+            "content": "You are a code analyzer. Summarize the insights from multiple code chunks and provide an overall assessment."
+        },
+        {
+            "role": "user",
+            "content": f"Summarize the following insights and provide an overall assessment:\n\n{insights}\n\nProvide a concise summary focusing on:\n1. Overall code quality\n2. Main technologies used\n3. Project complexity\n4. Test coverage\n5. Accuracy of project description\n\nKeep your summary to 5-7 sentences, tailored for recruiters."
+        }
+    ]
 
     response = client.chat.completions.create(
         model=MODEL, 
         messages=messages
     )
 
-    # average_score = total_score / num_chunks if num_chunks > 0 else 0
-    # aggregated_insights = "\n\n".join(insights)
-    # final_output = f"**Score: {average_score:.1f}**\n\n**Insights:**\n\n{aggregated_insights}"
-
-    return response
+    return response.choices[0].message.content
 
 def fetch_repo_files(repo):
     allowed_extensions = ('.py', '.html', '.js', '.css', '.java', '.cpp', '.ts', '.tsx')
@@ -231,7 +231,41 @@ def fetch_repo_files(repo):
             except Exception as exc:
                 warnings.append(f"Error fetching file {item.name}: {exc}")
 
-    return files_content, warnings
+    # Get additional repository information
+    repo_info = {
+        'name': repo.name,
+        'description': repo.description,
+        'language': repo.language,
+        'created_at': repo.created_at,
+        'updated_at': repo.updated_at,
+        'size': repo.size,
+        'stargazers_count': repo.stargazers_count,
+        'forks_count': repo.forks_count,
+    }
+
+    return files_content, warnings, repo_info
+
+def create_tech_stack_chart(tech_stacks):
+    tech_count = Counter(tech_stacks)
+    labels = list(tech_count.keys())
+    values = list(tech_count.values())
+
+    trace = go.Pie(labels=labels, values=values, textinfo='label+percent', insidetextorientation='radial')
+    layout = go.Layout(title='Technology Stack Distribution')
+    fig = go.Figure(data=[trace], layout=layout)
+    return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
+
+def create_code_quality_chart(repo_names, code_quality_scores):
+    trace = go.Bar(x=repo_names, y=code_quality_scores)
+    layout = go.Layout(title='Code Quality Scores by Repository', xaxis_title='Repository', yaxis_title='Code Quality Score')
+    fig = go.Figure(data=[trace], layout=layout)
+    return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
+
+def create_project_complexity_chart(repo_names, complexity_scores, creation_dates):
+    trace = go.Scatter(x=creation_dates, y=complexity_scores, mode='markers', text=repo_names, marker=dict(size=10))
+    layout = go.Layout(title='Project Complexity Over Time', xaxis_title='Creation Date', yaxis_title='Complexity Score')
+    fig = go.Figure(data=[trace], layout=layout)
+    return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
 
 @app.route('/analyze')
 def analyze():
@@ -244,36 +278,57 @@ def analyze():
     projects = session.get('projects', [])
     repo_names = [repo.name for repo in repos]
     repo_map = match_repos_to_projects(project_names, repo_names)
-    count = 0
+    
+    tech_stacks = []
+    code_quality_scores = []
+    complexity_scores = []
+    creation_dates = []
+    
     for project, repo_name in repo_map.items():
         repo = github.get_repo(f'{username}/{repo_name}')
         project_description = next((p for p in projects if project in p), "No description found")
         try:
-            files_content, warnings = fetch_repo_files(repo)
+            files_content, warnings, repo_info = fetch_repo_files(repo)
             if warnings:
                 for warning in warnings:
                     print(warning)
             if files_content:
-                count += 1
-                print(count)
-                if count < 3:
-                    continue
-                print(project_description)
-
-                print(repo_name)
                 ai_insights = analyze_code_with_gpt4(files_content, project_description)
-                ai_content = ai_insights.choices[0].message.content
+                
+                # Extract technology stack, code quality, and complexity scores
+                tech_stack_match = re.search(r'Main technologies used: (.*)', ai_insights)
+                if tech_stack_match:
+                    tech_stacks.extend([tech.strip() for tech in tech_stack_match.group(1).split(',')])
+                
+                code_quality_match = re.search(r'Overall code quality: (\d+)/10', ai_insights)
+                if code_quality_match:
+                    code_quality_scores.append((repo_name, int(code_quality_match.group(1))))
+                
+                complexity_match = re.search(r'Project complexity: (\d+)/10', ai_insights)
+                if complexity_match:
+                    complexity_scores.append((repo_name, int(complexity_match.group(1))))
+                    creation_dates.append(repo_info['created_at'])
+                
                 insights.append(f"""
                 <div class="insight">
-                    <h2>Repo: {repo.name}</h2>
+                    <h2>Repo: {repo_info['name']}</h2>
                     <p><strong>Project Description:</strong> {project_description}</p>
-                    <pre>{ai_content}</pre>
+                    <p><strong>Repository Info:</strong></p>
+                    <ul>
+                        <li>Language: {repo_info['language']}</li>
+                        <li>Created: {repo_info['created_at']}</li>
+                        <li>Last Updated: {repo_info['updated_at']}</li>
+                        <li>Size: {repo_info['size']} KB</li>
+                        <li>Stars: {repo_info['stargazers_count']}</li>
+                        <li>Forks: {repo_info['forks_count']}</li>
+                    </ul>
+                    <pre>{ai_insights}</pre>
                 </div>
                 """)
             else:
                 insights.append(f"""
                 <div class="insight">
-                    <h2>Repo: {repo.name}</h2>
+                    <h2>Repo: {repo_info['name']}</h2>
                     <p>No code files to analyze</p>
                 </div>
                 """)
@@ -284,6 +339,12 @@ def analyze():
                 <p>Error: {str(e)}</p>
             </div>
             """)
+    
+    # Create charts
+    tech_stack_chart = create_tech_stack_chart(tech_stacks)
+    code_quality_chart = create_code_quality_chart([score[0] for score in code_quality_scores], [score[1] for score in code_quality_scores])
+    project_complexity_chart = create_project_complexity_chart([score[0] for score in complexity_scores], [score[1] for score in complexity_scores], creation_dates)
+    
     insights_str = "".join(insights)
     return f"""
     <html>
@@ -315,26 +376,35 @@ def analyze():
                 border: 1px solid #ddd;
                 white-space: pre-wrap;
             }}
+            .chart {{
+                width: 100%;
+                height: 400px;
+                margin-bottom: 20px;
+            }}
         </style>
+        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     </head>
     <body>
         <div class="container">
             <h1>GitHub Insights</h1>
+            <div id="tech-stack-chart" class="chart"></div>
+            <div id="code-quality-chart" class="chart"></div>
+            <div id="project-complexity-chart" class="chart"></div>
             {insights_str}
         </div>
+        <script>
+            var techStackData = {tech_stack_chart};
+            Plotly.newPlot('tech-stack-chart', techStackData.data, techStackData.layout);
+            
+            var codeQualityData = {code_quality_chart};
+            Plotly.newPlot('code-quality-chart', codeQualityData.data, codeQualityData.layout);
+            
+            var projectComplexityData = {project_complexity_chart};
+            Plotly.newPlot('project-complexity-chart', projectComplexityData.data, projectComplexityData.layout);
+        </script>
     </body>
     </html>
     """
-                
-    #             insights.append(f"Repo: {repo.name}\n\nAI Insights: {ai_insights}\n\n")
-    #         else:
-    #             insights.append(f"Repo: {repo.name}\n\nAI Insights: No code files to analyze\n\n")
-            
-    #     except Exception as e:
-    #         insights.append(f"Project: {project}, Repo: {repo_name}, Error: {str(e)}")
-    
-    # insights_str = "<br><br>".join(insights)
-    # return f"<h1>GitHub Insights</h1><p>{insights_str}</p>"
 
 if __name__ == '__main__':
     app.run(debug=True)
