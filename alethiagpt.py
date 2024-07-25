@@ -21,7 +21,7 @@ UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'pdf'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-OPENAI_API_KEY = 'XXX'
+OPENAI_API_KEY = 'sk-proj-Crh7jg2GxphwO9yThoj8T3BlbkFJ2GM7V8dVPqoFoM8CYZiK'
 client = OpenAI(
     api_key=OPENAI_API_KEY,
 )
@@ -170,7 +170,7 @@ def analyze_code_with_gpt4(file_contents, project_description):
             },
             {
                 "role": "user",
-                "content": f"Analyze the following code and provide insights:\n\n{chunk}. See if this project description {project_description} is an accurate representation of the code, or if it is not accurate. Keep your evaluation to 3 sentences. "
+                "content": f"Analyze the following code and provide insights:\n\n{chunk}. See if this project description {project_description} is an accurate representation of the code, or if it is not accurate. Keep your evaluation to 3 sentences, in your evaluation do not mention the chunks, only mention the insights. Your audience is a recruiter, so provide them the required informatoin. No need to mention chunks, or your process, only give them info that they would find useful. Again, do not mention chunks, only speak about the project as a whole.  "
             }
         ]
 
@@ -262,15 +262,79 @@ def analyze():
 
                 print(repo_name)
                 ai_insights = analyze_code_with_gpt4(files_content, project_description)
-                insights.append(f"Repo: {repo.name}\n\nAI Insights: {ai_insights}\n\n")
+                ai_content = ai_insights.choices[0].message.content
+                insights.append(f"""
+                <div class="insight">
+                    <h2>Repo: {repo.name}</h2>
+                    <p><strong>Project Description:</strong> {project_description}</p>
+                    <pre>{ai_content}</pre>
+                </div>
+                """)
             else:
-                insights.append(f"Repo: {repo.name}\n\nAI Insights: No code files to analyze\n\n")
-            
+                insights.append(f"""
+                <div class="insight">
+                    <h2>Repo: {repo.name}</h2>
+                    <p>No code files to analyze</p>
+                </div>
+                """)
         except Exception as e:
-            insights.append(f"Project: {project}, Repo: {repo_name}, Error: {str(e)}")
+            insights.append(f"""
+            <div class="insight">
+                <h2>Project: {project}, Repo: {repo_name}</h2>
+                <p>Error: {str(e)}</p>
+            </div>
+            """)
+    insights_str = "".join(insights)
+    return f"""
+    <html>
+    <head>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                line-height: 1.6;
+            }}
+            .container {{
+                width: 80%;
+                margin: auto;
+            }}
+            .insight {{
+                margin-bottom: 20px;
+            }}
+            .insight h2 {{
+                background-color: #f2f2f2;
+                padding: 10px;
+                border-left: 5px solid #333;
+            }}
+            .insight p {{
+                padding: 10px;
+                background-color: #f9f9f9;
+            }}
+            .insight pre {{
+                background-color: #eef;
+                padding: 10px;
+                border: 1px solid #ddd;
+                white-space: pre-wrap;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>GitHub Insights</h1>
+            {insights_str}
+        </div>
+    </body>
+    </html>
+    """
+                
+    #             insights.append(f"Repo: {repo.name}\n\nAI Insights: {ai_insights}\n\n")
+    #         else:
+    #             insights.append(f"Repo: {repo.name}\n\nAI Insights: No code files to analyze\n\n")
+            
+    #     except Exception as e:
+    #         insights.append(f"Project: {project}, Repo: {repo_name}, Error: {str(e)}")
     
-    insights_str = "<br><br>".join(insights)
-    return f"<h1>GitHub Insights</h1><p>{insights_str}</p>"
+    # insights_str = "<br><br>".join(insights)
+    # return f"<h1>GitHub Insights</h1><p>{insights_str}</p>"
 
 if __name__ == '__main__':
     app.run(debug=True)
