@@ -158,6 +158,7 @@ def split_text_into_chunks(text, max_tokens=2000):
 
 def analyze_code_with_gpt4(file_contents, project_description):
     combined_text = "\n\n".join([content for _, content in file_contents])
+<<<<<<< Updated upstream
     chunks = split_text_into_chunks(combined_text)
     insights = []
     total_score = 0
@@ -200,6 +201,52 @@ def analyze_code_with_gpt4(file_contents, project_description):
     response = client.chat.completions.create(
         model=MODEL, 
         messages=messages
+=======
+    if len(combined_text) > 10000:  # Assuming 10,000 characters as a safe limit
+        combined_text = combined_text[:10000]
+    text_embeddings = create_embeddings([combined_text])
+    relevant_indices = find_relevant_contexts(faiss_index, text_embeddings)
+    relevant_context = "\n".join([session['projects'][i] for i in relevant_indices])
+    input_prompt = f"""
+You are a strict code analyzer and resume auditor. Focus solely on analyzing the provided code for this single repository. Provide a critical evaluation based on the following aspects:
+
+1. **Code Quality** (Score out of 10):
+   - Evaluate the code's structure, readability, and adherence to best practices.
+   - Provide specific examples of good or poor practices found in the code.
+
+2. **Technology Stack**:
+   - List all technologies, frameworks, and tools used in the code.
+   - Provide a percentage breakdown of each technology's usage in the codebase.
+   - Compare these with the technologies claimed in the resume, highlighting any discrepancies.
+
+3. **Project Complexity** (Score out of 10):
+   - Assess the complexity of the project based on the code's functionality and structure.
+   - Justify the complexity score with specific examples from the code.
+
+4. **Test Coverage** (Score out of 10):
+   - Evaluate the presence and quality of tests in the code.
+   - If tests are present, assess their coverage and effectiveness.
+
+5. **Resume Accuracy** (Score out of 10):
+   - Verify the accuracy of the resume's description of the project.
+   - Identify any discrepancies between the resume and the code, particularly regarding the use of specific technologies and tools.
+   - Provide examples of accurate and inaccurate claims in the resume.
+
+Relevant Context from Resume:
+{relevant_context}
+
+Project Description:
+{project_description}
+
+Code:
+{combined_text}
+
+Provide a detailed, critical analysis focusing on the above aspects. Be strict in your evaluation and highlight any discrepancies or issues found. Do not suggest improvements or discuss potential enhancements. This analysis is intended for recruiters to assess the candidate's code quality and resume accuracy.
+"""
+    chat_completion = client.chat.completions.create(
+        messages=[{"role": "user", "content": input_prompt}],
+        model="llama-3.1-70b-versatile",
+>>>>>>> Stashed changes
     )
 
     # average_score = total_score / num_chunks if num_chunks > 0 else 0
@@ -244,7 +291,13 @@ def analyze():
     projects = session.get('projects', [])
     repo_names = [repo.name for repo in repos]
     repo_map = match_repos_to_projects(project_names, repo_names)
+<<<<<<< Updated upstream
     count = 0
+=======
+    resume_embeddings = create_embeddings(projects)
+    faiss_index = build_faiss_index(resume_embeddings)
+
+>>>>>>> Stashed changes
     for project, repo_name in repo_map.items():
         repo = github.get_repo(f'{username}/{repo_name}')
         project_description = next((p for p in projects if project in p), "No description found")
@@ -254,6 +307,7 @@ def analyze():
                 for warning in warnings:
                     print(warning)
             if files_content:
+<<<<<<< Updated upstream
                 count += 1
                 print(count)
                 if count < 3:
@@ -286,39 +340,103 @@ def analyze():
             """)
     insights_str = "".join(insights)
     return f"""
+=======
+                ai_insights = analyze_code_with_llama3(files_content, project_description, faiss_index, resume_embeddings)
+
+                insights.append({
+                    'repo_name': repo_info['name'],
+                    'project_description': project_description,
+                    'repo_info': repo_info,
+                    'ai_insights': ai_insights
+                })
+            else:
+                print(f"No code files to analyze for repo: {repo_name}")
+                insights.append({
+                    'repo_name': repo_info['name'],
+                    'project_description': project_description,
+                    'repo_info': repo_info,
+                    'ai_insights': "No code files to analyze"
+                })
+        except Exception as e:
+            print(f"Error analyzing repo {repo_name}: {str(e)}")
+            insights.append({
+                'repo_name': repo_name,
+                'project_description': project,
+                'repo_info': {},
+                'ai_insights': f"Error: {str(e)}"
+            })
+
+    return render_template_string('''
+>>>>>>> Stashed changes
     <html>
     <head>
         <style>
-            body {{
-                font-family: Arial, sans-serif;
-                line-height: 1.6;
-            }}
-            .container {{
-                width: 80%;
+            body {
+                font-family: 'Helvetica Neue', Arial, sans-serif;
+                background-color: #111;
+                color: #fff;
+                margin: 0;
+                padding: 0;
+            }
+            .container {
+                width: 90%;
                 margin: auto;
-            }}
-            .insight {{
-                margin-bottom: 20px;
-            }}
-            .insight h2 {{
-                background-color: #f2f2f2;
+                padding: 20px;
+                max-width: 1200px;
+            }
+            .tab {
+                overflow: hidden;
+                border: 1px solid #444;
+                background-color: #222;
+            }
+            .tab button {
+                background-color: inherit;
+                float: left;
+                border: none;
+                outline: none;
+                cursor: pointer;
+                padding: 14px 16px;
+                transition: 0.3s;
+                color: #fff;
+            }
+            .tab button:hover {
+                background-color: #333;
+            }
+            .tab button.active {
+                background-color: #444;
+            }
+            .tabcontent {
+                display: none;
+                padding: 20px;
+                border: 1px solid #444;
+                border-top: none;
+                background-color: #222;
+            }
+            .insight h2 {
+                color: #ff4081;
+                font-size: 24px;
+                margin-top: 0;
+            }
+            .insight p, .insight ul {
+                margin: 0 0 10px 0;
+            }
+            .insight pre {
+                background-color: #333;
                 padding: 10px;
-                border-left: 5px solid #333;
-            }}
-            .insight p {{
-                padding: 10px;
-                background-color: #f9f9f9;
-            }}
-            .insight pre {{
-                background-color: #eef;
-                padding: 10px;
-                border: 1px solid #ddd;
+                border-radius: 5px;
+                overflow-x: auto;
                 white-space: pre-wrap;
+<<<<<<< Updated upstream
             }}
+=======
+                word-wrap: break-word;
+            }
+>>>>>>> Stashed changes
         </style>
     </head>
     <body>
         <div class="container">
+<<<<<<< Updated upstream
             <h1>GitHub Insights</h1>
             {insights_str}
         </div>
@@ -335,6 +453,55 @@ def analyze():
     
     # insights_str = "<br><br>".join(insights)
     # return f"<h1>GitHub Insights</h1><p>{insights_str}</p>"
+=======
+            <h1 style="color: #ff4081;">GitHub Insights Dashboard</h1>
+            <div class="tab">
+                {% for insight in insights %}
+                    <button class="tablinks" onclick="openRepo(event, '{{ insight.repo_name }}')">{{ insight.repo_name }}</button>
+                {% endfor %}
+            </div>
+
+            {% for insight in insights %}
+                <div id="{{ insight.repo_name }}" class="tabcontent">
+                    <div class="insight">
+                        <h2>{{ insight.repo_name }}</h2>
+                        <p><strong>Project Description:</strong> {{ insight.project_description }}</p>
+                        <p><strong>Repository Info:</strong></p>
+                        <ul>
+                            <li>Language: {{ insight.repo_info.language }}</li>
+                            <li>Created: {{ insight.repo_info.created_at }}</li>
+                            <li>Last Updated: {{ insight.repo_info.updated_at }}</li>
+                            <li>Size: {{ insight.repo_info.size }} KB</li>
+                            <li>Stars: {{ insight.repo_info.stargazers_count }}</li>
+                            <li>Forks: {{ insight.repo_info.forks_count }}</li>
+                        </ul>
+                        <pre>{{ insight.ai_insights }}</pre>
+                    </div>
+                </div>
+            {% endfor %}
+        </div>
+        <script>
+            function openRepo(evt, repoName) {
+                var i, tabcontent, tablinks;
+                tabcontent = document.getElementsByClassName("tabcontent");
+                for (i = 0; i < tabcontent.length; i++) {
+                    tabcontent[i].style.display = "none";
+                }
+                tablinks = document.getElementsByClassName("tablinks");
+                for (i = 0; i < tablinks.length; i++) {
+                    tablinks[i].className = tablinks[i].className.replace(" active", "");
+                }
+                document.getElementById(repoName).style.display = "block";
+                evt.currentTarget.className += " active";
+            }
+
+            // Open the first tab by default
+            document.getElementsByClassName("tablinks")[0].click();
+        </script>
+    </body>
+    </html>
+    ''', insights=insights)
+>>>>>>> Stashed changes
 
 if __name__ == '__main__':
     app.run(debug=True)
