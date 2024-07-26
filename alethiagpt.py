@@ -155,49 +155,6 @@ def get_access_token(code):
         print(f"Failed to obtain access token: {response.text}")
         return None
 
-def split_text_into_chunks(text, max_tokens=2000):
-    max_length = max_tokens * 4
-    chunks = []
-    while len(text) > max_length:
-        split_index = text.rfind('\n', 0, max_length)
-        if split_index == -1:
-            split_index = max_length
-        chunks.append(text[:split_index])
-        text = text[split_index:]
-    chunks.append(text)
-    return chunks
-
-def analyze_code_with_llama3(file_contents, project_description, faiss_index, resume_embeddings):
-    api_key = "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"
-    client = Groq(api_key=api_key)
-    combined_text = "\n\n".join([content for _, content in file_contents])
-    if len(combined_text) > 10000:  # Assuming 10,000 characters as a safe limit
-        combined_text = combined_text[:10000]
-    text_embeddings = create_embeddings([combined_text])
-    relevant_indices = find_relevant_contexts(faiss_index, text_embeddings)
-    relevant_context = "\n".join([session['projects'][i] for i in relevant_indices])
-    input_prompt = f"""
-You are a code analyzer and resume auditor. Analyze the provided code and resume information, including relevant context, and provide insights on the following aspects:
-1. **Code Quality**: Evaluate the code's structure, readability, and adherence to best practices.
-2. **Technology Stack**: List the technologies, frameworks, and tools actually used in the code. Compare these with the technologies claimed in the resume.
-3. **Project Complexity**: Assess the complexity of the project based on the code's functionality and structure.
-4. **Test Coverage**: Check if the code includes tests, and if so, evaluate their coverage.
-5. **Resume Accuracy**: Verify the accuracy of the resume's description of the project. Identify any discrepancies between the resume and the code, particularly regarding the use of specific technologies and tools.
-6. **Authenticity and Consistency**: Evaluate whether the resume and code seem to be produced by the same person. Note any inconsistencies in the style, language, or technical proficiency.
-
-Relevant Context from Resume:
-{relevant_context}
-Project Description: {project_description}
-Code: {combined_text}
-Provide your insights, highlighting any discrepancies between the resume and the code, especially regarding the technology stack.
-"""
-    chat_completion = client.chat.completions.create(
-        messages=[{"role": "user", "content": input_prompt}],
-        model="llama-3.1-8b-instant",
-    )
-    output_text = chat_completion.choices[0].message.content
-    return output_text
-
 def fetch_repo_files(repo):
     allowed_extensions = ('.py', '.html', '.js', '.css', '.java', '.cpp', '.ts', '.tsx')
     excluded_directories = ('node_modules', 'vendor', 'dist', 'build', '__pycache__')
@@ -240,17 +197,57 @@ def create_tech_stack_chart(tech_stacks):
     fig = go.Figure(data=[trace], layout=layout)
     return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
 
-def create_code_quality_chart(repo_names, code_quality_scores):
-    trace = go.Bar(x=repo_names, y=code_quality_scores)
-    layout = go.Layout(title='Code Quality Scores by Repository', xaxis_title='Repository', yaxis_title='Code Quality Score')
-    fig = go.Figure(data=[trace], layout=layout)
-    return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
+def analyze_code_with_llama3(file_contents, project_description, faiss_index, resume_embeddings):
+    api_key = "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"
+    client = Groq(api_key=api_key)
+    combined_text = "\n\n".join([content for _, content in file_contents])
+    if len(combined_text) > 10000:  # Assuming 10,000 characters as a safe limit
+        combined_text = combined_text[:10000]
+    text_embeddings = create_embeddings([combined_text])
+    relevant_indices = find_relevant_contexts(faiss_index, text_embeddings)
+    relevant_context = "\n".join([session['projects'][i] for i in relevant_indices])
+    input_prompt = f"""
+You are a strict code analyzer and resume auditor. Focus solely on analyzing the provided code for this single repository. Provide a critical evaluation based on the following aspects:
 
-def create_project_complexity_chart(repo_names, complexity_scores, creation_dates):
-    trace = go.Scatter(x=creation_dates, y=complexity_scores, mode='markers', text=repo_names, marker=dict(size=10))
-    layout = go.Layout(title='Project Complexity Over Time', xaxis_title='Creation Date', yaxis_title='Complexity Score')
-    fig = go.Figure(data=[trace], layout=layout)
-    return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
+1. **Code Quality** (Score out of 10):
+   - Evaluate the code's structure, readability, and adherence to best practices.
+   - Provide specific examples of good or poor practices found in the code, do not give advice,.
+
+2. **Technology Stack**:
+   - List all technologies, frameworks, and tools used in the code.
+   - Provide a percentage breakdown of each technology's usage in the codebase. Ensure that the percentages match to 100%
+   - Compare these with the technologies claimed in the resume, highlighting any discrepancies.
+
+3. **Project Complexity** (Score out of 10):
+   - Assess the complexity of the project based on the code's functionality and structure.
+   - Justify the complexity score with specific examples from the code.
+
+4. **Test Coverage** (Score out of 10):
+   - Evaluate the presence and quality of tests in the code.
+   - If tests are present, assess their coverage and effectiveness.
+
+5. **Resume Accuracy** (Score out of 10):
+   - Verify the accuracy of the resume's description of the project.
+   - Identify any discrepancies between the resume and the code, particularly regarding the use of specific technologies and tools.
+   - Provide examples of accurate and inaccurate claims in the resume.
+
+Relevant Context from Resume:
+{relevant_context}
+
+Project Description:
+{project_description}
+
+Code:
+{combined_text}
+
+Provide a detailed, critical analysis focusing on the above aspects. Be strict in your evaluation and highlight any discrepancies or issues found. Do not suggest improvements or discuss potential enhancements. This analysis is intended for recruiters to assess the candidate's code quality and resume accuracy.
+"""
+    chat_completion = client.chat.completions.create(
+        messages=[{"role": "user", "content": input_prompt}],
+        model="llama-3.1-70b-versatile",
+    )
+    output_text = chat_completion.choices[0].message.content
+    return output_text
 
 @app.route('/analyze')
 def analyze():
@@ -265,10 +262,6 @@ def analyze():
     repo_map = match_repos_to_projects(project_names, repo_names)
     resume_embeddings = create_embeddings(projects)
     faiss_index = build_faiss_index(resume_embeddings)
-    tech_stacks = []
-    code_quality_scores = []
-    complexity_scores = []
-    creation_dates = []
 
     for project, repo_name in repo_map.items():
         repo = github.get_repo(f'{username}/{repo_name}')
@@ -278,134 +271,157 @@ def analyze():
             if warnings:
                 for warning in warnings:
                     print(f"Warning: {warning}")
+
+            # Example data, replace with actual tech stack extraction
+            tech_stacks = ['Python']
+            tech_stack_chart = create_tech_stack_chart(tech_stacks)
+
             if files_content:
                 ai_insights = analyze_code_with_llama3(files_content, project_description, faiss_index, resume_embeddings)
 
-                # Extract technology stack, code quality, and complexity scores
-                tech_stack_match = re.search(r'\*\*Technology Stack Insights:\*\*\n\n(.*?)(?=\n\n)', ai_insights, re.DOTALL)
-                if tech_stack_match:
-                    tech_stacks.extend([tech.strip() for tech in tech_stack_match.group(1).split('\n') if tech.strip()])
-
-                code_quality_match = re.search(r'Overall code quality: (\d+)/10', ai_insights)
-                if code_quality_match:
-                    code_quality_scores.append((repo_name, int(code_quality_match.group(1))))
-
-                complexity_match = re.search(r'Project complexity: (\d+)/10', ai_insights)
-                if complexity_match:
-                    complexity_scores.append((repo_name, int(complexity_match.group(1))))
-                    creation_dates.append(repo_info['created_at'])
-
-                insights.append(f"""
-                <div class="insight">
-                    <h2>Repo: {repo_info['name']}</h2>
-                    <p><strong>Project Description:</strong> {project_description}</p>
-                    <p><strong>Repository Info:</strong></p>
-                    <ul>
-                        <li>Language: {repo_info['language']}</li>
-                        <li>Created: {repo_info['created_at']}</li>
-                        <li>Last Updated: {repo_info['updated_at']}</li>
-                        <li>Size: {repo_info['size']} KB</li>
-                        <li>Stars: {repo_info['stargazers_count']}</li>
-                        <li>Forks: {repo_info['forks_count']}</li>
-                    </ul>
-                    <pre>{ai_insights}</pre>
-                </div>
-                """)
+                insights.append({
+                    'repo_name': repo_info['name'],
+                    'project_description': project_description,
+                    'repo_info': repo_info,
+                    'ai_insights': ai_insights,
+                    'tech_stack_chart': tech_stack_chart
+                })
             else:
-                print(f"No code files to analyze for repo: {repo_name}")
-                insights.append(f"""
-                <div class="insight">
-                    <h2>Repo: {repo_info['name']}</h2>
-                    <p>No code files to analyze</p>
-                </div>
-                """)
+                insights.append({
+                    'repo_name': repo_info['name'],
+                    'project_description': project_description,
+                    'repo_info': repo_info,
+                    'ai_insights': "No code files to analyze",
+                    'tech_stack_chart': tech_stack_chart
+                })
         except Exception as e:
             print(f"Error analyzing repo {repo_name}: {str(e)}")
-            insights.append(f"""
-            <div class="insight">
-                <h2>Project: {project}, Repo: {repo_name}</h2>
-                <p>Error: {str(e)}</p>
-            </div>
-            """)
+            insights.append({
+                'repo_name': repo_name,
+                'project_description': project,
+                'repo_info': {},
+                'ai_insights': f"Error: {str(e)}",
+                'tech_stack_chart': tech_stack_chart
+            })
 
-    print("Tech Stacks:", tech_stacks)
-    print("Code Quality Scores:", code_quality_scores)
-
-    # Ensure data is not empty before creating charts
-    if tech_stacks:
-        tech_stack_chart = create_tech_stack_chart(tech_stacks)
-    else:
-        tech_stack_chart = json.dumps({})  # Empty chart data if no tech stacks
-
-    if code_quality_scores:
-        code_quality_chart = create_code_quality_chart([score[0] for score in code_quality_scores], [score[1] for score in code_quality_scores])
-    else:
-        code_quality_chart = json.dumps({})  # Empty chart data if no quality scores
-
-    if complexity_scores:
-        project_complexity_chart = create_project_complexity_chart([score[0] for score in complexity_scores], [score[1] for score in complexity_scores], creation_dates)
-    else:
-        project_complexity_chart = json.dumps({})  # Empty chart data if no complexity scores
-
-    return f"""
+    return render_template_string('''
     <html>
     <head>
         <style>
-            body {{
-                font-family: Arial, sans-serif;
-                line-height: 1.6;
-            }}
-            .container {{
-                width: 80%;
+            body {
+                font-family: 'Helvetica Neue', Arial, sans-serif;
+                background-color: #111;
+                color: #fff;
+                margin: 0;
+                padding: 0;
+            }
+            .container {
+                width: 90%;
                 margin: auto;
-            }}
-            .insight {{
-                margin-bottom: 20px;
-            }}
-            .insight h2 {{
-                background-color: #f2f2f2;
+                padding: 20px;
+                max-width: 1200px;
+            }
+            .tab {
+                overflow: hidden;
+                border: 1px solid #444;
+                background-color: #222;
+            }
+            .tab button {
+                background-color: inherit;
+                float: left;
+                border: none;
+                outline: none;
+                cursor: pointer;
+                padding: 14px 16px;
+                transition: 0.3s;
+                color: #fff;
+            }
+            .tab button:hover {
+                background-color: #333;
+            }
+            .tab button.active {
+                background-color: #444;
+            }
+            .tabcontent {
+                display: none;
+                padding: 20px;
+                border: 1px solid #444;
+                border-top: none;
+                background-color: #222;
+            }
+            .insight h2 {
+                color: #ff4081;
+                font-size: 24px;
+                margin-top: 0;
+            }
+            .insight p, .insight ul {
+                margin: 0 0 10px 0;
+            }
+            .insight pre {
+                background-color: #333;
                 padding: 10px;
-                border-left: 5px solid #333;
-            }}
-            .insight p {{
-                padding: 10px;
-                background-color: #f9f9f9;
-            }}
-            .insight pre {{
-                background-color: #eef;
-                padding: 10px;
-                border: 1px solid #ddd;
+                border-radius: 5px;
+                overflow-x: auto;
                 white-space: pre-wrap;
-            }}
-            .chart {{
-                width: 100%;
-                height: 400px;
-                margin-bottom: 20px;
-            }}
+                word-wrap: break-word;
+            }
         </style>
         <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     </head>
     <body>
         <div class="container">
-            <h1>GitHub Insights</h1>
-            <div id="tech-stack-chart" class="chart"></div>
-            <div id="code-quality-chart" class="chart"></div>
-            <div id="project-complexity-chart" class="chart"></div>
-            {''.join(insights)}
+            <h1 style="color: #ff4081;">GitHub Insights Dashboard</h1>
+            <div class="tab">
+                {% for insight in insights %}
+                    <button class="tablinks" onclick="openRepo(event, '{{ insight.repo_name }}')">{{ insight.repo_name }}</button>
+                {% endfor %}
+            </div>
+
+            {% for insight in insights %}
+                <div id="{{ insight.repo_name }}" class="tabcontent">
+                    <div class="insight">
+                        <h2>{{ insight.repo_name }}</h2>
+                        <p><strong>Project Description:</strong> {{ insight.project_description }}</p>
+                        <p><strong>Repository Info:</strong></p>
+                        <ul>
+                            <li>Language: {{ insight.repo_info.language }}</li>
+                            <li>Created: {{ insight.repo_info.created_at }}</li>
+                            <li>Last Updated: {{ insight.repo_info.updated_at }}</li>
+                            <li>Size: {{ insight.repo_info.size }} KB</li>
+                            <li>Stars: {{ insight.repo_info.stargazers_count }}</li>
+                            <li>Forks: {{ insight.repo_info.forks_count }}</li>
+                        </ul>
+                        <div id="tech_stack_chart_{{ insight.repo_name }}" style="width:100%;height:400px;"></div>
+                        <script>
+                            var data = {{ insight.tech_stack_chart }};
+                            Plotly.newPlot('tech_stack_chart_{{ insight.repo_name }}', data.data, data.layout);
+                        </script>
+                        <pre>{{ insight.ai_insights }}</pre>
+                    </div>
+                </div>
+            {% endfor %}
         </div>
         <script>
-            var techStackData = {tech_stack_chart};
-            Plotly.newPlot('tech-stack-chart', techStackData.data, techStackData.layout);
-            
-            var codeQualityData = {code_quality_chart};
-            Plotly.newPlot('code-quality-chart', codeQualityData.data, codeQualityData.layout);
-            
-            var projectComplexityData = {project_complexity_chart};
-            Plotly.newPlot('project-complexity-chart', projectComplexityData.data, projectComplexityData.layout);
+            function openRepo(evt, repoName) {
+                var i, tabcontent, tablinks;
+                tabcontent = document.getElementsByClassName("tabcontent");
+                for (i = 0; i < tabcontent.length; i++) {
+                    tabcontent[i].style.display = "none";
+                }
+                tablinks = document.getElementsByClassName("tablinks");
+                for (i = 0; i < tablinks.length; i++) {
+                    tablinks[i].className = tablinks[i].className.replace(" active", "");
+                }
+                document.getElementById(repoName).style.display = "block";
+                evt.currentTarget.className += " active";
+            }
+
+            // Open the first tab by default
+            document.getElementsByClassName("tablinks")[0].click();
         </script>
     </body>
     </html>
-    """
+    ''', insights=insights)
 
 if __name__ == '__main__':
     app.run(debug=True)
