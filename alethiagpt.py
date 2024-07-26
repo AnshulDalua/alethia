@@ -5,11 +5,16 @@ import os
 import pdfplumber
 import re
 from werkzeug.utils import secure_filename
-from langchain.document_loaders import GithubFileLoader
-from langchain.text_splitter import CharacterTextSplitter
-import logging
+from sentence_transformers import SentenceTransformer
+import numpy as np
+import faiss
 from fuzzywuzzy import process
-from openai import OpenAI
+import plotly.graph_objs as go
+import plotly.utils
+import json
+from collections import Counter
+from datetime import datetime
+from groq import Groq
 
 app = Flask(__name__)
 app.secret_key = 'a_secure_secret_key'
@@ -21,20 +26,15 @@ UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'pdf'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-OPENAI_API_KEY = 'sk-proj-Crh7jg2GxphwO9yThoj8T3BlbkFJ2GM7V8dVPqoFoM8CYZiK'
-client = OpenAI(
-    api_key=OPENAI_API_KEY,
-)
-MODEL = 'gpt-4o'
-
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
+
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def fetch_file_content(file):
-    """Fetches content of a single file."""
     if file.encoding == "base64":
         return file.path, file.decoded_content.decode('utf-8', errors='ignore')
     else:
@@ -45,7 +45,6 @@ def extract_projects_from_pdf(pdf_path):
         text = ''
         for page in pdf.pages:
             text += page.extract_text()
-    
     projects_section = re.search(r'(?i)projects(.*?)(?=Experience|Education|Skills|$)', text, re.DOTALL)
     if projects_section:
         projects_text = projects_section.group(1).strip()
@@ -55,7 +54,6 @@ def extract_projects_from_pdf(pdf_path):
             lines = project.split('\n')
             formatted_project = lines[0] + "\n" + "\n".join(["• " + line.strip() for line in lines[1:] if line.strip()])
             formatted_projects.append(formatted_project.strip())
-        
         return formatted_projects
     else:
         return []
@@ -75,6 +73,23 @@ def match_repos_to_projects(project_names, repo_names):
         if closest_match:
             repo_map[project] = closest_match[0]
     return repo_map
+
+def create_embeddings(texts):
+    embeddings = embedding_model.encode(texts, convert_to_tensor=True)
+    if embeddings.device.type != 'cpu':
+        embeddings = embeddings.cpu()
+    return embeddings
+
+def build_faiss_index(embeddings):
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(embeddings.numpy())
+    return index
+
+def find_relevant_contexts(faiss_index, query_embedding, top_k=5):
+    query_embedding = query_embedding.cpu().numpy()
+    _, indices = faiss_index.search(query_embedding, top_k)
+    return indices[0]
 
 @app.route('/')
 def home():
@@ -101,7 +116,6 @@ def upload_file():
         filename = secure_filename(file.filename)
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
-        
         projects = extract_projects_from_pdf(filepath)
         session['projects'] = projects
         session['project_names'] = extract_project_names(projects)
@@ -141,67 +155,52 @@ def get_access_token(code):
         print(f"Failed to obtain access token: {response.text}")
         return None
 
-def split_text_into_chunks(text, max_tokens=2000):
-    max_length = max_tokens * 4
-    chunks = []
+def fetch_repo_files(repo):
+    allowed_extensions = ('.py', '.html', '.js', '.css', '.java', '.cpp', '.ts', '.tsx')
+    excluded_directories = ('node_modules', 'vendor', 'dist', 'build', '__pycache__')
+    files_content = []
+    warnings = []
+    contents = repo.get_contents("")
+    while contents:
+        item = contents.pop(0)
+        if item.type == 'dir':
+            if any(excluded in item.path for excluded in excluded_directories):
+                continue
+            contents.extend(repo.get_contents(item.path))
+        elif item.type == 'file' and item.path.endswith(allowed_extensions):
+            try:
+                if item.encoding == "base64":
+                    file_content = item.decoded_content.decode('utf-8', errors='ignore')
+                    files_content.append((item.path, file_content))
+                else:
+                    warnings.append(f"Skipping file with unsupported encoding: {item.name}")
+            except Exception as exc:
+                warnings.append(f"Error fetching file {item.name}: {exc}")
+    repo_info = {
+        'name': repo.name,
+        'description': repo.description,
+        'language': repo.language,
+        'created_at': repo.created_at,
+        'updated_at': repo.updated_at,
+        'size': repo.size,
+        'stargazers_count': repo.stargazers_count,
+        'forks_count': repo.forks_count,
+    }
+    return files_content, warnings, repo_info
 
-    while len(text) > max_length:
-        split_index = text.rfind('\n', 0, max_length)
-        if split_index == -1:
-            split_index = max_length
-        
-        chunks.append(text[:split_index])
-        text = text[split_index:]
+def create_tech_stack_chart(tech_stacks):
+    tech_count = Counter(tech_stacks)
+    labels = list(tech_count.keys())
+    values = list(tech_count.values())
+    trace = go.Pie(labels=labels, values=values, textinfo='label+percent', insidetextorientation='radial')
+    layout = go.Layout(title='Technology Stack Distribution')
+    fig = go.Figure(data=[trace], layout=layout)
+    return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
 
-    chunks.append(text)
-    return chunks
-
-def analyze_code_with_gpt4(file_contents, project_description):
+def analyze_code_with_llama3(file_contents, project_description, faiss_index, resume_embeddings):
+    api_key = "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"
+    client = Groq(api_key=api_key)
     combined_text = "\n\n".join([content for _, content in file_contents])
-<<<<<<< Updated upstream
-    chunks = split_text_into_chunks(combined_text)
-    insights = []
-    total_score = 0
-    num_chunks = len(chunks)
-    for chunk in chunks:
-        messages = [
-            {
-                "role": "system",
-                "content": "You are a code analyzer. Please analyze the provided code and provide insights. You are to detect if an applicant's project description from their resume is an accurate representation of the code, or if it is not accurate. Please first generate a score from 1-10 regarding if the code aligns with the description. Follow this rubric: 1-3: Inaccurate, 4-6: Partially Accurate, 7-10: Accurate."
-            },
-            {
-                "role": "user",
-                "content": f"Analyze the following code and provide insights:\n\n{chunk}. See if this project description {project_description} is an accurate representation of the code, or if it is not accurate. Keep your evaluation to 3 sentences, in your evaluation do not mention the chunks, only mention the insights. Your audience is a recruiter, so provide them the required informatoin. No need to mention chunks, or your process, only give them info that they would find useful. Again, do not mention chunks, only speak about the project as a whole.  "
-            }
-        ]
-
-        response = client.chat.completions.create(
-            model=MODEL, 
-            messages=messages
-        )
-
-        print(response)
-
-        insights.append(response.choices[0].message.content)
-        score_match = re.search(r'\*\*Score: (\d+)\*\*', response.choices[0].message.content)
-        if score_match:
-            total_score += int(score_match.group(1))
-    
-    messages = [
-            {
-                "role": "system",
-                "content": "You are a code analyzer. Please analyze the provided code and provide insights. You are to detect if an applicant's project description from their resume is an accurate representation of the code, or if it is not accurate. You have already analyzed each chunk of the code, and generated a score from 1-10 regarding if the code aligns with the description. You followed this rubric: 1-3: Inaccurate, 4-6: Partially Accurate, 7-10: Accurate. Now you are given all the insights for each chunk, your job is to read the analysis you have already done chunk by chunk, and give an overall score as well as insigts. Know that since you only had access to each chunk when you analyzed before, some scores may be inaccurate as the chunk you analyzed may not be directly related to the description, or maybe the chunk is less relevent part of the project. For example, you may have ranked a chunk a score of 5 when the other chunks were scores of 8-9, meaning that chunk was a non essential code, while the rest were. In this case the project should be rated a 9 as the other chunks satisfied the description. "
-            },
-            {
-                "role": "user",
-                "content": f"Analyze the following insights and provide an overall score for the applicants project to see if the project description is accurate or not:\n\n{insights}. Each insight is an isight of a chunk, your job is to read through each insight already generated and you are to provide an overall score. Know that some insights may be lower than they should, as the chunk analyzed was not a direct representation of the description, while other chunks were. Keep your evaluation to 3 sentences + score.  "
-            }
-        ]
-
-    response = client.chat.completions.create(
-        model=MODEL, 
-        messages=messages
-=======
     if len(combined_text) > 10000:  # Assuming 10,000 characters as a safe limit
         combined_text = combined_text[:10000]
     text_embeddings = create_embeddings([combined_text])
@@ -212,11 +211,11 @@ You are a strict code analyzer and resume auditor. Focus solely on analyzing the
 
 1. **Code Quality** (Score out of 10):
    - Evaluate the code's structure, readability, and adherence to best practices.
-   - Provide specific examples of good or poor practices found in the code.
+   - Provide specific examples of good or poor practices found in the code, do not give advice,.
 
 2. **Technology Stack**:
    - List all technologies, frameworks, and tools used in the code.
-   - Provide a percentage breakdown of each technology's usage in the codebase.
+   - Provide a percentage breakdown of each technology's usage in the codebase. Ensure that the percentages match to 100%
    - Compare these with the technologies claimed in the resume, highlighting any discrepancies.
 
 3. **Project Complexity** (Score out of 10):
@@ -246,39 +245,9 @@ Provide a detailed, critical analysis focusing on the above aspects. Be strict i
     chat_completion = client.chat.completions.create(
         messages=[{"role": "user", "content": input_prompt}],
         model="llama-3.1-70b-versatile",
->>>>>>> Stashed changes
     )
-
-    # average_score = total_score / num_chunks if num_chunks > 0 else 0
-    # aggregated_insights = "\n\n".join(insights)
-    # final_output = f"**Score: {average_score:.1f}**\n\n**Insights:**\n\n{aggregated_insights}"
-
-    return response
-
-def fetch_repo_files(repo):
-    allowed_extensions = ('.py', '.html', '.js', '.css', '.java', '.cpp', '.ts', '.tsx')
-    excluded_directories = ('node_modules', 'vendor', 'dist', 'build', '__pycache__')
-    files_content = []
-    warnings = []
-    contents = repo.get_contents("")
-
-    while contents:
-        item = contents.pop(0)
-        if item.type == 'dir':
-            if any(excluded in item.path for excluded in excluded_directories):
-                continue
-            contents.extend(repo.get_contents(item.path))
-        elif item.type == 'file' and item.path.endswith(allowed_extensions):
-            try:
-                if item.encoding == "base64":
-                    file_content = item.decoded_content.decode('utf-8', errors='ignore')
-                    files_content.append((item.path, file_content))
-                else:
-                    warnings.append(f"Skipping file with unsupported encoding: {item.name}")
-            except Exception as exc:
-                warnings.append(f"Error fetching file {item.name}: {exc}")
-
-    return files_content, warnings
+    output_text = chat_completion.choices[0].message.content
+    return output_text
 
 @app.route('/analyze')
 def analyze():
@@ -291,71 +260,39 @@ def analyze():
     projects = session.get('projects', [])
     repo_names = [repo.name for repo in repos]
     repo_map = match_repos_to_projects(project_names, repo_names)
-<<<<<<< Updated upstream
-    count = 0
-=======
     resume_embeddings = create_embeddings(projects)
     faiss_index = build_faiss_index(resume_embeddings)
 
->>>>>>> Stashed changes
     for project, repo_name in repo_map.items():
         repo = github.get_repo(f'{username}/{repo_name}')
         project_description = next((p for p in projects if project in p), "No description found")
         try:
-            files_content, warnings = fetch_repo_files(repo)
+            files_content, warnings, repo_info = fetch_repo_files(repo)
             if warnings:
                 for warning in warnings:
-                    print(warning)
-            if files_content:
-<<<<<<< Updated upstream
-                count += 1
-                print(count)
-                if count < 3:
-                    continue
-                print(project_description)
+                    print(f"Warning: {warning}")
 
-                print(repo_name)
-                ai_insights = analyze_code_with_gpt4(files_content, project_description)
-                ai_content = ai_insights.choices[0].message.content
-                insights.append(f"""
-                <div class="insight">
-                    <h2>Repo: {repo.name}</h2>
-                    <p><strong>Project Description:</strong> {project_description}</p>
-                    <pre>{ai_content}</pre>
-                </div>
-                """)
-            else:
-                insights.append(f"""
-                <div class="insight">
-                    <h2>Repo: {repo.name}</h2>
-                    <p>No code files to analyze</p>
-                </div>
-                """)
-        except Exception as e:
-            insights.append(f"""
-            <div class="insight">
-                <h2>Project: {project}, Repo: {repo_name}</h2>
-                <p>Error: {str(e)}</p>
-            </div>
-            """)
-    insights_str = "".join(insights)
-    return f"""
-=======
+            # Example data, replace with actual tech stack extraction
+            tech_stacks = ['Python']
+            tech_stack_chart = create_tech_stack_chart(tech_stacks)
+
+            if files_content:
                 ai_insights = analyze_code_with_llama3(files_content, project_description, faiss_index, resume_embeddings)
 
                 insights.append({
                     'repo_name': repo_info['name'],
                     'project_description': project_description,
                     'repo_info': repo_info,
-                    'ai_insights': ai_insights
+                    'ai_insights': ai_insights,
+                    'tech_stack_chart': tech_stack_chart
                 })
             else:
-                print(f"No code files to analyze for repo: {repo_name}")
                 insights.append({
                     'repo_name': repo_info['name'],
                     'project_description': project_description,
                     'repo_info': repo_info,
-                    'ai_insights': "No code files to analyze"
+                    'ai_insights': "No code files to analyze",
+                    'tech_stack_chart': tech_stack_chart
                 })
         except Exception as e:
             print(f"Error analyzing repo {repo_name}: {str(e)}")
@@ -363,11 +300,11 @@ def analyze():
                 'repo_name': repo_name,
                 'project_description': project,
                 'repo_info': {},
-                'ai_insights': f"Error: {str(e)}"
+                'ai_insights': f"Error: {str(e)}",
+                'tech_stack_chart': tech_stack_chart
             })
 
     return render_template_string('''
->>>>>>> Stashed changes
     <html>
     <head>
         <style>
@@ -426,34 +363,13 @@ def analyze():
                 border-radius: 5px;
                 overflow-x: auto;
                 white-space: pre-wrap;
-<<<<<<< Updated upstream
-            }}
-=======
                 word-wrap: break-word;
             }
->>>>>>> Stashed changes
         </style>
+        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     </head>
     <body>
         <div class="container">
-<<<<<<< Updated upstream
-            <h1>GitHub Insights</h1>
-            {insights_str}
-        </div>
-    </body>
-    </html>
-    """
-                
-    #             insights.append(f"Repo: {repo.name}\n\nAI Insights: {ai_insights}\n\n")
-    #         else:
-    #             insights.append(f"Repo: {repo.name}\n\nAI Insights: No code files to analyze\n\n")
-            
-    #     except Exception as e:
-    #         insights.append(f"Project: {project}, Repo: {repo_name}, Error: {str(e)}")
-    
-    # insights_str = "<br><br>".join(insights)
-    # return f"<h1>GitHub Insights</h1><p>{insights_str}</p>"
-=======
             <h1 style="color: #ff4081;">GitHub Insights Dashboard</h1>
             <div class="tab">
                 {% for insight in insights %}
@@ -475,6 +391,11 @@ def analyze():
                             <li>Stars: {{ insight.repo_info.stargazers_count }}</li>
                             <li>Forks: {{ insight.repo_info.forks_count }}</li>
                         </ul>
+                        <div id="tech_stack_chart_{{ insight.repo_name }}" style="width:100%;height:400px;"></div>
+                        <script>
+                            var data = {{ insight.tech_stack_chart }};
+                            Plotly.newPlot('tech_stack_chart_{{ insight.repo_name }}', data.data, data.layout);
+                        </script>
                         <pre>{{ insight.ai_insights }}</pre>
                     </div>
                 </div>
@@ -501,7 +422,6 @@ def analyze():
     </body>
     </html>
     ''', insights=insights)
->>>>>>> Stashed changes
 
 if __name__ == '__main__':
     app.run(debug=True)
